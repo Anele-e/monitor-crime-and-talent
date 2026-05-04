@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 import zipfile
+
+import sqlalchemy
 from airflow import DAG
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.operators.python import PythonOperator, ShortCircuitOperator
 from sqlalchemy import create_engine, engine, text
+from sqlalchemy.engine import make_url
 from geoalchemy2 import Geometry
 import re
 from datetime import datetime
@@ -27,7 +30,7 @@ log = logging.getLogger(__name__)
 RAW_DIR    = Path("/opt/airflow/data/raw/saps")
 HASH_STORE = Path("/opt/airflow/data/.saps_hashes.json")
 URL = "https://www.saps.gov.za/services/crimestats.php"
-DB_CONNECTION_STRING = "postgresql+psycopg2://anele:anele123@postgres/crime_talent_db"
+DB_CONNECTION_STRING = "postgresql+psycopg2://airflow:airflow@postgres:5432/airflow_meta" #"postgresql://airflow:airflow@postgres:5432/airflow_meta" # "postgresql+psycopg2://anele:anele123@postgres/crime_talent_db"
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -171,14 +174,9 @@ def download_raw_data(**ctx):
         if content_length and downloaded != int(content_length):
             raise ValueError(f"Download incomplete: expected {content_length}, and got {downloaded}")
 
-    # try:
-    #     test_file = pd.read_excel(file_path, sheet_name="RAW Data", header=2, nrows=5)
-    # except Exception as e:
-    #     log.error(f"Download error: {e} for file {filename}")
-    #     os.remove(file_path)
-    #     raise ValueError("Downloaded file is not a valid Excel file: {e}")
+    
     validate_excel(file_path)
-    # clean_file_path = clean_excel(file_path)
+   
     
     log.info(f"Downloadded {filename} and sanitized file created: {file_path}")
     return str(file_path)
@@ -198,19 +196,7 @@ def validate_excel(file_path):
     except Exception as e:
         raise ValueError(f"Invalid Excel file: {e}")
 
-# def clean_excel(input_path):
-#     try:
-#         df = pd.read_excel(input_path, sheet_name="RAW Data", header=2)
 
-#         clean_path = str(input_path).replace(".xlsx", "_clean.xlsx")
-
-#         with pd.ExcelWriter(clean_path, engine="openpyxl") as writer:
-#             df.to_excel(writer, sheet_name="RAW Data", index=False, header=True)
-
-#         return clean_path
-
-    # except Exception as e:
-    #     raise ValueError(f"Raw Data Excel sheet sanitization failed: {e}")
 
 def clean_data(**ctx):
     output_path = RAW_DIR / "cleaned_crime_data.parquet"
@@ -222,10 +208,6 @@ def clean_data(**ctx):
     excel_file = ti.xcom_pull(task_ids="download_raw_data")
     if not excel_file:
         raise ValueError("No file path received from download_raw_data")
-    # excel_file = next(RAW_DIR.glob("*.xls*"))
-
-    # if not excel_file:
-    #     raise FileNotFoundError(f"No Excel files found in {RAW_DIR}")
 
     excel_path = Path(excel_file)
     if not excel_path.exists():
@@ -247,7 +229,7 @@ def clean_data(**ctx):
     
     latest_quarter_col = get_latest_quarter_column(crime_data)
     count_col = latest_quarter_col
-    # count_col = [c for c in crime_data.columns if 'October_2025' in str(c)][0]
+    
     
     crime_data_clean = crime_data[['Station', 'District', 'Crime_Category', count_col, 'National_contribution_placement', 'Provincial_contribution_placement', 'Count_direction']].copy()
     crime_data_clean.columns = ['Station', 'District', 'Crime_Type', 'Crime_Count', 'National_placement', 'Provincial_placement', 'Count_direction']
@@ -298,9 +280,9 @@ def load_saps_shapefile(**ctx):
 
 def merge_tables(**ctx):
     output = RAW_DIR / "merged_table.parquet"
-    if output.exists():
-        log.info(f"Merged table already exists at {output}, skipping reprocessing.")
-        return str(output)
+    # if output.exists():
+    #     log.info(f"Merged table already exists at {output}, skipping reprocessing.")
+    #     return str(output)
     
     ti = ctx["ti"]
 
@@ -320,13 +302,14 @@ def merge_tables(**ctx):
     left_index=True,
     right_index=True,
     how="inner"
-)
+).reset_index()
+    
     if gdf.crs is None:
         gdf = gdf.set_crs("EPSG:4326")
     # gdf = gpd.GeoDataFrame(gdf, geometry='geometry')
     # gdf = gdf.set_crs('EPSG:4326')
     # sample_gdf = gdf.sample(100, random_state=42)
-    output = RAW_DIR / "merged_table.parquet"
+    
     gdf.to_parquet(output, index=False)
     
 
@@ -350,7 +333,8 @@ def load_to_postgis(**ctx):
     if "geometry" not in gdf.columns:
         raise KeyError("Merged data does not contain 'geometry' column")
 
-    gdf = gpd.GeoDataFrame(gdf, geometry="geometry")
+    if not isinstance(gdf, gpd.GeoDataFrame):
+        gdf = gpd.GeoDataFrame(gdf, geometry="geometry")
     
     missing_geometry = gdf['geometry'].isnull().sum()
     if missing_geometry:
@@ -381,27 +365,38 @@ def load_to_postgis(**ctx):
     log.info("Geometry types: %s", gdf.geometry.geom_type.unique())
 
     gdf["ingested_at"] = datetime.utcnow()
-    gdf = gdf[gdf.is_valid]
+    gdf = gdf[gdf.geometry.is_valid]
 
+    # conn_url = DB_CONNECTION_STRING.replace("postgres://", "postgresql://")
+    # url_obj = make_url(conn_url)
+    # engine = create_engine(url_obj)
     engine = create_engine(DB_CONNECTION_STRING)
 
-    with engine.begin() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+    # with engine.begin() as conn:
+    #     conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
 
     # from sqlalchemy.engine import Engine
 
     # assert isinstance(engine, Engine), f"Not a SQLAlchemy engine: {type(engine)}"
-    with engine.begin() as conn:
+    
+    log.info(f"Geometry column type: {type(gdf.geometry.iloc[0])}")
+    import sqlalchemy
+    print(sqlalchemy.__version__)
 
-        gdf.to_postgis(
-            name="saps_crime_stats",
-            con=conn,
-            if_exists="replace", 
-            index=False,
-            # dtype={"geometry": Geometry("GEOMETRY", srid=4326)},
-            # method="multi",
-            chunksize=1000
-        )
+    print(type(engine))
+    print(gdf.dtypes)
+    print(gdf.geometry.dtype)
+    with engine.connect() as conn:
+        with conn.begin():
+            gdf.to_postgis(
+                name="saps_crime_stats",
+                con=conn,
+                if_exists="replace", 
+                index=False,
+                dtype={"geometry": Geometry("MULTIPOLYGON", srid=4326)},
+                # method=None,
+                chunksize=1000
+            )
 
     with engine.begin() as conn:
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saps_crime_stats_geometry ON saps_crime_stats USING GIST(geometry)"))
