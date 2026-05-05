@@ -203,13 +203,18 @@ def clean_data(**ctx):
     if output_path.exists():
         log.info(f"Cleaned data already exists at {output_path}, skipping reprocessing.")
         return str(output_path)
-    ti = ctx["ti"]
-   
-    excel_file = ti.xcom_pull(task_ids="download_raw_data")
-    if not excel_file:
-        raise ValueError("No file path received from download_raw_data")
-
-    excel_path = Path(excel_file)
+    
+    excel_file = list(RAW_DIR.glob("*.xlsx"))
+    if excel_file:
+        excel_path = excel_file[0]
+        log.info(f"Found existing Excel file in raw directory: {excel_path}, using it for cleaning.")
+    else:
+        ti = ctx["ti"]
+        excel_file = ti.xcom_pull(task_ids="download_raw_data")
+        if not excel_file:
+            raise ValueError("No file path received from download_raw_data")
+        excel_path = Path(excel_file)
+        
     if not excel_path.exists():
         raise FileNotFoundError(f"Downloaded file not found: {excel_path}")    
     try:
