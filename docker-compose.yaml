@@ -80,7 +80,24 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # 5. OFFICIAL GITHUB ACTIONS RUNNER (Customized)
+  # 5. FastAPI BACKEND
+  fastapi-backend:
+    build:
+      context: ./backend
+      dockerfile: ../infra/fastapi.Dockerfile
+    container_name: fastapi-backend
+    restart: always
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crime-net
+
+  # 6. OFFICIAL GITHUB ACTIONS RUNNER (Customized)
   deploy-agent:
     build:
       context: ./infra
