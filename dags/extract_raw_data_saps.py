@@ -30,7 +30,11 @@ log = logging.getLogger(__name__)
 RAW_DIR    = Path("/opt/airflow/data/raw/saps")
 HASH_STORE = Path("/opt/airflow/data/.saps_hashes.json")
 URL = "https://www.saps.gov.za/services/crimestats.php"
-DB_CONNECTION_STRING = "postgresql+psycopg2://airflow:airflow@postgres:5432/airflow_meta" #"postgresql://airflow:airflow@postgres:5432/airflow_meta" # "postgresql+psycopg2://anele:anele123@postgres/crime_talent_db"
+DB_CONNECTION_STRING = "postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}@postgres:5432/{POSTGRES_DB}".format(
+    POSTGRES_USER=os.getenv("POSTGRES_USER", "airflow"),
+    POSTGRES_PASSWORD=os.getenv("POSTGRES_PASSWORD", "airflow"),
+    POSTGRES_DB=os.getenv("POSTGRES_DB", "airflow_meta")
+)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -340,6 +344,8 @@ def load_to_postgis(**ctx):
 
     if not isinstance(gdf, gpd.GeoDataFrame):
         gdf = gpd.GeoDataFrame(gdf, geometry="geometry")
+
+    gdf["geometry"] = gdf["geometry"].apply(lambda geom: MultiPolygon([geom]) if geom.geom_type == "Polygon" else geom)
     
     missing_geometry = gdf['geometry'].isnull().sum()
     if missing_geometry:
@@ -359,8 +365,7 @@ def load_to_postgis(**ctx):
         log.info(f"Reprojecting GeoDataFrame from {gdf.crs} to EPSG:4326")
         gdf = gdf.to_crs('EPSG:4326')
 
-    # gdf_proj = gdf.to_crs(epsg=3857)
-    # gdf["geometry"] = gdf_proj.centroid.to_crs(epsg=4326)
+   
 
     gdf.columns = (
         gdf.columns
@@ -372,17 +377,9 @@ def load_to_postgis(**ctx):
     gdf["ingested_at"] = datetime.utcnow()
     gdf = gdf[gdf.geometry.is_valid]
 
-    # conn_url = DB_CONNECTION_STRING.replace("postgres://", "postgresql://")
-    # url_obj = make_url(conn_url)
-    # engine = create_engine(url_obj)
+    log.info(f"DB_CONNECTION_STRING = {DB_CONNECTION_STRING}")
     engine = create_engine(DB_CONNECTION_STRING)
 
-    # with engine.begin() as conn:
-    #     conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
-
-    # from sqlalchemy.engine import Engine
-
-    # assert isinstance(engine, Engine), f"Not a SQLAlchemy engine: {type(engine)}"
     
     log.info(f"Geometry column type: {type(gdf.geometry.iloc[0])}")
     import sqlalchemy
